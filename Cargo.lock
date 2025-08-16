@@ -4366,6 +4366,7 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "moonlink",
+ "moonlink_error",
  "more-asserts",
  "postgres-types",
  "serde",
