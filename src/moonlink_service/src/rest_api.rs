@@ -9,6 +9,7 @@ use moonlink::StorageConfig;
 use moonlink_backend::{table_config::TableConfig, table_status::TableStatus};
 use moonlink_backend::{EventRequest, FileEventOperation, RowEventOperation};
 use moonlink_backend::{FileEventRequest, RowEventRequest, REST_API_URI};
+use moonlink_error::ErrorStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -161,7 +162,31 @@ pub struct HealthResponse {
     pub timestamp: u64,
 }
 
-/// Create the router with all API endpoints
+/// Map backend error to appropriate HTTP status code based on error type
+fn get_backend_error_status_code(error: &moonlink_backend::Error) -> StatusCode {
+    match error {
+        moonlink_backend::Error::InvalidArgumentError(_)
+        | moonlink_backend::Error::ParseIntError(_)
+        | moonlink_backend::Error::Json(_) => StatusCode::BAD_REQUEST,
+
+        _ => match error.get_status() {
+            ErrorStatus::Temporary => StatusCode::SERVICE_UNAVAILABLE,
+            ErrorStatus::Permanent => StatusCode::INTERNAL_SERVER_ERROR,
+        },
+    }
+}
+
+/// Map specific error contexts that don't have backend errors
+fn get_context_error_status_code(error_type: &str) -> StatusCode {
+    match error_type {
+        "serialization_failed" => StatusCode::INTERNAL_SERVER_ERROR,
+        "invalid_schema" => StatusCode::BAD_REQUEST,
+        "invalid_operation" => StatusCode::BAD_REQUEST,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Create the router with all API endpoints    
 pub fn create_router(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health_check))
@@ -261,7 +286,7 @@ async fn create_table(
         Ok(fields) => fields,
         Err(e) => {
             return Err((
-                StatusCode::BAD_REQUEST,
+                get_context_error_status_code("invalid_schema"),
                 Json(ErrorResponse {
                     error: "invalid_schema".to_string(),
                     message: e,
@@ -277,7 +302,7 @@ async fn create_table(
         Ok(cfg) => cfg,
         Err(e) => {
             return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
+                get_context_error_status_code("serialization_failed"),
                 Json(ErrorResponse {
                     error: "serialization_failed".to_string(),
                     message: format!("Serialize table config failed: {e}"),
@@ -314,7 +339,7 @@ async fn create_table(
         Err(e) => {
             error!("Failed to create table '{}': {}", table, e);
             Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
+                get_backend_error_status_code(&e),
                 Json(ErrorResponse {
                     error: "table_creation_failed".to_string(),
                     message: format!("Failed to create table: {e}"),
@@ -347,7 +372,7 @@ async fn list_tables(
     match state.backend.list_tables().await {
         Ok(tables) => Ok(Json(ListTablesResponse { tables })),
         Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
+            get_backend_error_status_code(&e),
             Json(ErrorResponse {
                 error: "table_list_failed".to_string(),
                 message: format!("Failed to list tables: {e}"),
@@ -372,7 +397,7 @@ async fn upload_files(
         "upload" => FileEventOperation::Upload,
         _ => {
             return Err((
-                StatusCode::BAD_REQUEST,
+                get_context_error_status_code("invalid_operation"),
                 Json(ErrorResponse {
                     error: "invalid_operation".to_string(),
                     message: format!(
@@ -405,7 +430,7 @@ async fn upload_files(
         .map_err(|e| {
             error!("Failed to send event request: {}", e);
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                get_backend_error_status_code(&e),
                 Json(ErrorResponse {
                     error: "file_upload_failed".to_string(),
                     message: format!("Failed to process request: {e}"),
@@ -439,7 +464,7 @@ async fn ingest_data(
         "delete" => RowEventOperation::Delete,
         _ => {
             return Err((
-                StatusCode::BAD_REQUEST,
+                get_context_error_status_code("invalid_operation"),
                 Json(ErrorResponse {
                     error: "invalid_operation".to_string(),
                     message: format!(
@@ -473,7 +498,7 @@ async fn ingest_data(
         .map_err(|e| {
             error!("Failed to send event request: {}", e);
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                get_backend_error_status_code(&e),
                 Json(ErrorResponse {
                     error: "ingestion_failed".to_string(),
                     message: format!("Failed to process request: {e}"),
